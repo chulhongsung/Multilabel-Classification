@@ -93,8 +93,8 @@ class C2AE(K.layers.Layer):
         return emb_feature, emb_label, recon_label
 #%%
 class CCA_Loss(K.models.Model):
-    def __init__(self, regularization_factor=0.1, name="cca loss"):
-        super().__init__(name=name)
+    def __init__(self, regularization_factor=0.1):
+        super().__init__()
         self.regularization_factor = regularization_factor
 
     def call(self, emb_feature, emb_label):
@@ -108,34 +108,37 @@ class CCA_Loss(K.models.Model):
 #%%
 X, y, feature_names, label_names = load_dataset('tmc2007_500', 'train')
 #%%
-train_X = np.array(X.todense(), dtype=np.float32)[0:1000]
-train_Y = np.array(y.todense(), dtype=np.float32)[0:1000]
-#%%
 c2ae = C2AE([512, 512], [512], [22])
-cl = CustomLoss()
-max_iter = 200
+cl = CCA_Loss()
+max_iter = 1000
 # optimizer = K.optimizers.Adam(learning_rate=0.001)
 optimizer = K.optimizers.RMSprop(learning_rate=0.001)
 #%%
 tmc2007 = tf.data.Dataset.from_tensor_slices((np.array(X.todense(), dtype=np.float32),np.array(y.todense(), dtype=np.float32)))
 #%%
-BATCH_SIZE = 500
+BATCH_SIZE = 1000
 tmc_data = tmc2007.shuffle(buffer_size=15000)
 tmc_data_batch = tmc_data.batch(BATCH_SIZE)
+feature, label = next(iter(tmc_data_batch))
 #%%
+train_loss = tf.keras.metrics.Mean(name='train_loss')
+# %%
+@tf.function
+def train_step(model, feature, label):
+    with tf.GradientTape() as tape:
+        a, b, c = model([feature, label])
+        accuracy_loss = tf.math.reduce_sum(tf.map_fn(fn=lambda t: tf.math.divide(tf.math.reduce_sum(tf.exp(tf.reshape(t[0][(t[0] * t[1]) == 0], (tf.math.reduce_sum(tf.cast((t[0] * t[1]) == 0, tf.int32)), 1)) - tf.reshape(t[0][(t[0] * t[1]) != 0], (1, tf.math.reduce_sum(tf.cast((t[0] * t[1]) != 0, tf.int32))) ) )), tf.math.reduce_sum(tf.cast(t[1] == 0, tf.float32)) * tf.math.reduce_sum(tf.cast(t[1] != 0, tf.float32))),
+                                                     elems= (c, label),
+                                                     fn_output_signature=tf.float32))
+        cca_loss = cl(a, b)
+        loss =  cca_loss + 1 * accuracy_loss 
+    grad = tape.gradient(loss, model.weights)
+    optimizer.apply_gradients(zip(grad, model.weights))
+    train_loss(loss)
+# %%
 EPOCHS = 100
-for i in range(EPOCHS):
-    epoch_cca_loss = 0
-    epoch_acc_loss = 0
+for epoch in range(EPOCHS):
     for feature, label in iter(tmc_data_batch):
-        with tf.GradientTape() as tape:    
-            a,b,c = c2ae([feature, label])
-            accuracy_loss = tf.math.reduce_sum(tf.map_fn(fn=lambda t: tf.math.divide(tf.math.reduce_sum(tf.exp(tf.reshape(t[0][(t[0] * t[1]) == 0], (np.sum((t[0] * t[1]) == 0), 1)) - tf.reshape(t[0][(t[0] * t[1]) != 0], (1, np.sum((t[0] * t[1]) != 0))))) , tf.math.reduce_sum(tf.cast(t[1] == 0, tf.float32)) * tf.math.reduce_sum(tf.cast(t[1] != 0, tf.float32))), elems= (c, label), fn_output_signature=tf.float32))
-            cca_loss = cl(a, b)
-            loss = cca_loss + 1 * accuracy_loss 
-            epoch_cca_loss = epoch_cca_loss + cca_loss
-            epoch_acc_loss = epoch_acc_loss + accuracy_loss
-            total_loss = epoch_cca_loss + epoch_acc_loss
-        grad = tape.gradient(loss, c2ae.weights)
-        optimizer.apply_gradients(zip(grad, c2ae.weights))
-    print("iteration {:03d}: Total Loss {:.04f}, CCA Loss {:.04f}, Accuracy Loss {:.04f}".format(i+1, total_loss.numpy(), epoch_cca_loss.numpy(), epoch_acc_loss.numpy()))
+        train_step(c2ae, feature, label)
+    template = 'EPOCH: {}, Train Loss: {}'
+    print(template.format(epoch+1, train_loss.result()))
