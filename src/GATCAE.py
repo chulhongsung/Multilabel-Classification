@@ -53,6 +53,7 @@ class GAT(K.layers.Layer):
     def get_config(self):
         config = super().get_config().copy()
         config.update({
+            'embedding': self.embedding_layer,
             'query': self.wq,
             'key': self.wk,
             'value': self.wv
@@ -109,7 +110,8 @@ class Label_Decoder(K.layers.Layer):
         super(Label_Decoder, self).__init__()
         self.n_layer = len(dim_model)
         self.dim_model = dim_model
-        self.decoder = [K.layers.Dense(self.dim_model[i], activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer)]
+        self.decoder = [K.layers.Dense(self.dim_model[i], activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer-1)]
+        self.decoder.append(K.layers.Dense(self.dim_model[self.n_layer-1], activation='sigmoid'))
         
     def get_config(self):
         config = super().get_config().copy()
@@ -182,18 +184,6 @@ X, y, feature_names, label_names = load_dataset('tmc2007_500', 'train')
 #                                 maxlen=MAX_PAD_LENGTH,
 #                                 padding='post')
 # np.save('tmc2007_label.npy',padded_label)
-padded_label = np.load('tmc2007_label.npy')
-#%%
-gatcae = GATCAE(22, 10, 10, 10, [512], [22], [512])
-cl = CCA_Loss()
-optimizer = K.optimizers.Adam(learning_rate=0.001)
-train_loss = tf.keras.metrics.Mean(name='train_loss')
-#%%
-BATCH_SIZE = 500
-
-tmc2007 = tf.data.Dataset.from_tensor_slices((np.array(X.todense(), dtype=np.float32), padded_label, np.array(y.todense(), dtype=np.float32)))
-tmc_data = tmc2007.shuffle(buffer_size=15000)
-tmc_data_batch = tmc_data.batch(BATCH_SIZE)
 # %%
 @tf.function
 def train_step(model, feature, label_idx, label):
@@ -207,11 +197,26 @@ def train_step(model, feature, label_idx, label):
     grad = tape.gradient(loss, model.weights)
     optimizer.apply_gradients(zip(grad, model.weights))
     train_loss(loss)
+padded_label = np.load('tmc2007_label.npy')
+#%%
+gatcae = GATCAE(22, 10, 10, 10, [10], [22], [10])
+cl = CCA_Loss()
+optimizer = K.optimizers.Adam(learning_rate=0.001)
+train_loss = tf.keras.metrics.Mean(name='train_loss')
+#%%
+BATCH_SIZE = 500
+
+tmc2007 = tf.data.Dataset.from_tensor_slices((np.array(X.todense(), dtype=np.float32), padded_label, np.array(y.todense(), dtype=np.float32)))
+tmc_data = tmc2007.shuffle(buffer_size=15000)
+tmc_data_batch = tmc_data.batch(BATCH_SIZE)
+
 # %%
-EPOCHS = 20
+EPOCHS = 500
 for epoch in range(EPOCHS):
     for feature, label_idx, label in iter(tmc_data_batch):
         train_step(gatcae, feature, label_idx, label)
         
     template = 'EPOCH: {}, Train Loss: {}'
     print(template.format(epoch+1, train_loss.result()))
+#%%
+gatcae.save('gatcae_1204')
