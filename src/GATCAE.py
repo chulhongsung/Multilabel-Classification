@@ -14,7 +14,8 @@ class Feature_Encoder(K.layers.Layer):
         super(Feature_Encoder, self).__init__()
         self.n_layer = len(dim_model)
         self.dim_model = dim_model
-        self.encoder = [K.layers.Dense(self.dim_model[i], activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer)]
+        self.encoder = [K.layers.Dense(self.dim_model[i],
+                                       activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer)]
         
     def get_config(self):
         config = super().get_config().copy()
@@ -29,25 +30,28 @@ class Feature_Encoder(K.layers.Layer):
         return x
 #%%
 class GAT(K.layers.Layer):
-    def __init__(self, num_labels, dim_embedding1, dim_embedding2):
+    def __init__(self, num_labels, dim_embedding1, dim_embedding2, dropout):
         super(GAT, self).__init__()
         self.embedding_layer = tf.keras.layers.Embedding(num_labels+1, dim_embedding1, mask_zero=True)
         self.wq = K.layers.Dense(dim_embedding2)
         self.wk = K.layers.Dense(dim_embedding2)
-        self.wv = K.layers.Dense(dim_embedding2)   
-        #self.layernorm = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.wv = K.layers.Dense(dim_embedding2)
+        self.dropout1 = K.layers.Dropout(dropout)   
+        self.dropout2 = K.layers.Dropout(dropout)
+        self.dropout3 = K.layers.Dropout(dropout)
+        self.dim_embedding2 = dim_embedding2
         
-    def attention(self, q, k, v):
+    def attention(self, q, k, v, label):
         matmul_qk = tf.linalg.matmul(q, k, transpose_b=True)
     
         dk = tf.cast(tf.shape(k)[-1], tf.float32)
     
         scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)
     
-        attention_weights = tf.nn.softmax(scaled_attention_logits, axis=-1)
+        attention_weights  = tf.transpose(tf.cast(tf.where(label == 0, 0, 1)[:,tf.newaxis,:], tf.float32), [0, 2, 1]) * tf.nn.softmax(scaled_attention_logits, axis=-1)
         
         output = tf.matmul(attention_weights, v)
-
+        
         return output, attention_weights
     
     def get_config(self):
@@ -58,40 +62,50 @@ class GAT(K.layers.Layer):
             'key': self.wk,
             'value': self.wv
         })
+        
+        return config
     
     def call(self, input):
         x = self.embedding_layer(input)
-        q = self.wq(x)
-        k = self.wk(x)
-        v = self.wv(x)
-        self_attention, _ = self.attention(q, k, v)
-        # attn_output = self.layernorm(self_attention)        
-        return self_attention
-#%% vanilla attention
+        q = self.dropout1(self.wq(x))
+        k = self.dropout2(self.wk(x))
+        v = self.dropout3(self.wv(x))
+        self_attention, _ = self.attention(q, k, v, input)
+        
+        return self_attention 
+#%% 
 class LabelSet_Attention(K.layers.Layer):
     def __init__(self, dim_embedding):
         super(LabelSet_Attention, self).__init__()
-        self.w = K.layers.Dense(dim_embedding, activation='tanh')
-        self.wi = K.layers.Dense(1)
-
+        self.w = K.layers.Dense(dim_embedding)
+        self.dim_embedding = dim_embedding
+        
     def get_config(self):
         config = super().get_config().copy()
         config.update({
             'w': self.w,
-            'wi': self.wi
         })
-    
-    def call(self, input):
-        weight = tf.nn.softmax(self.wi(self.w(input)), axis=1)
-        label_set = tf.linalg.matmul(weight, input, transpose_a=True)
-        return label_set
+        
+        return config
+        
+    def call(self, input, label):
+        q = self.w(input)
+        k = self.w(input)
+        matmul_qk = tf.linalg.matmul(q, k, transpose_b=True)
+        dk = tf.cast(tf.shape(k)[-1], tf.float32)
+        scaled_attention_logits = matmul_qk / tf.math.sqrt(dk)        
+        weight = tf.where(label != 0, tf.exp(tf.reduce_sum(scaled_attention_logits, -1)), 0) / tf.reduce_sum(tf.where(label != 0, tf.exp(tf.reduce_sum(scaled_attention_logits, -1)), 0), -1)[:, tf.newaxis]
+        label_set = tf.linalg.matmul(weight[:, tf.newaxis, :], input)
+        
+        return label_set 
 #%%
 class Label_Encoder(K.layers.Layer):
     def __init__(self, dim_model):
         super(Label_Encoder, self).__init__()
         self.n_layer = len(dim_model)
         self.dim_model = dim_model
-        self.encoder = [K.layers.Dense(self.dim_model[i], activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer)]
+        self.encoder = [K.layers.Dense(self.dim_model[i],
+                                       activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer)]
         
     def get_config(self):
         config = super().get_config().copy()
@@ -110,7 +124,8 @@ class Label_Decoder(K.layers.Layer):
         super(Label_Decoder, self).__init__()
         self.n_layer = len(dim_model)
         self.dim_model = dim_model
-        self.decoder = [K.layers.Dense(self.dim_model[i], activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer-1)]
+        self.decoder = [K.layers.Dense(self.dim_model[i],
+                                       activation=tf.keras.layers.LeakyReLU(alpha=0.3)) for i in range(self.n_layer-1)]
         self.decoder.append(K.layers.Dense(self.dim_model[self.n_layer-1], activation='sigmoid'))
         
     def get_config(self):
@@ -126,9 +141,9 @@ class Label_Decoder(K.layers.Layer):
         return x
 #%%
 class GATCAE(K.models.Model):
-    def __init__(self, num_labels, dim_embedding1, dim_embedding2, dim_embedding3, label_encoder_dim, label_decoder_dim, feature_encoder_dim):
+    def __init__(self, num_labels, dim_embedding1, dim_embedding2, dim_embedding3, label_encoder_dim, label_decoder_dim, feature_encoder_dim, dropout=0.05):
         super(GATCAE, self).__init__()
-        self.graph_attention_network = GAT(num_labels, dim_embedding1, dim_embedding2)
+        self.graph_attention_network = GAT(num_labels, dim_embedding1, dim_embedding2, dropout)
         self.label_representation = LabelSet_Attention(dim_embedding3)
         self.label_encoder = Label_Encoder(label_encoder_dim)
         self.label_decoder = Label_Decoder(label_decoder_dim)
@@ -148,7 +163,7 @@ class GATCAE(K.models.Model):
     def call(self, input):
         feature, label = input
         node_feature = self.graph_attention_network(label)
-        label_list_feature = self.label_representation(node_feature)
+        label_list_feature = self.label_representation(node_feature, label)
         latent_label_feature = self.label_encoder(label_list_feature)
         recon_label = self.label_decoder(latent_label_feature)
         latent_feature = self.feature_encoder(feature)
@@ -184,7 +199,19 @@ X, y, feature_names, label_names = load_dataset('tmc2007_500', 'train')
 #                                 maxlen=MAX_PAD_LENGTH,
 #                                 padding='post')
 # np.save('tmc2007_label.npy',padded_label)
-# %%
+label_idx = np.load('tmc2007_label.npy')
+#%%
+gatcae = GATCAE2(22, 100, 100, 10, [10], [22], [10])
+cl = CCA_Loss()
+optimizer = K.optimizers.Adam(learning_rate=0.001)
+train_loss = tf.keras.metrics.Mean(name='train_loss')
+#%%
+BATCH_SIZE = 500
+
+tmc2007 = tf.data.Dataset.from_tensor_slices((np.array(X.todense(), dtype=np.float32), label_idx, np.array(y.todense(), dtype=np.float32)))
+tmc_data = tmc2007
+tmc_data_batch = tmc_data.batch(BATCH_SIZE)
+#%%
 @tf.function
 def train_step(model, feature, label_idx, label):
     with tf.GradientTape() as tape:
@@ -197,26 +224,11 @@ def train_step(model, feature, label_idx, label):
     grad = tape.gradient(loss, model.weights)
     optimizer.apply_gradients(zip(grad, model.weights))
     train_loss(loss)
-padded_label = np.load('tmc2007_label.npy')
 #%%
-gatcae = GATCAE(22, 10, 10, 10, [10], [22], [10])
-cl = CCA_Loss()
-optimizer = K.optimizers.Adam(learning_rate=0.001)
-train_loss = tf.keras.metrics.Mean(name='train_loss')
-#%%
-BATCH_SIZE = 500
+EPOCHS = 400
 
-tmc2007 = tf.data.Dataset.from_tensor_slices((np.array(X.todense(), dtype=np.float32), padded_label, np.array(y.todense(), dtype=np.float32)))
-tmc_data = tmc2007.shuffle(buffer_size=15000)
-tmc_data_batch = tmc_data.batch(BATCH_SIZE)
-
-# %%
-EPOCHS = 500
 for epoch in range(EPOCHS):
-    for feature, label_idx, label in iter(tmc_data_batch):
-        train_step(gatcae, feature, label_idx, label)
-        
+    for batch_feature, batch_label_idx, batch_label in iter(tmc_data_batch):
+        train_step(gatcae, batch_feature, batch_label_idx, batch_label)
     template = 'EPOCH: {}, Train Loss: {}'
     print(template.format(epoch+1, train_loss.result()))
-#%%
-gatcae.save('gatcae_1204')
